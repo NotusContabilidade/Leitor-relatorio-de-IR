@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nótus - Leitor de Relatório de IR</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <script type="text/javascript" src="/eel.js"></script>
+
+    <div class="container">
+        <header>
+            <div class="logo-container">
+                <img src="logo.jpg" alt="Nótus Contábil">
+            </div>
+            <h1>Leitor de Relatório de IR</h1>
+            <p>Arraste arquivos <strong>.zip</strong> ou <strong>.pdf</strong> para análise automática.</p>
+
+            <div class="header-actions">
+                <button id="history-button" class="btn-history">
+                    <span>🕓</span> Histórico de Sessões
+                </button>
+            </div>
+        </header>
+
+        <div id="main-view">
+            <div id="drop-zone">
+                <input type="file" id="file-input" accept=".zip,.pdf" multiple />
+                <div class="drop-content">
+                    <span id="drop-zone-text" style="font-size: 1.2rem; color: #aaa;">
+                        Solte seus arquivos aqui<br>
+                        <small style="font-size: 0.9rem;">(ZIP ou PDFs do Relatório de IR)</small>
+                    </span>
+                </div>
+
+                <div id="loading-state" style="display: none;">
+                    <div class="spinner"></div>
+                    <span id="loading-text">Processando...</span>
+                    <div id="progress-bar-container"><div id="progress-bar"></div></div>
+                </div>
+
+                <div id="success-state" style="display: none;">
+                    <span style="font-size: 2.5rem;">✅</span>
+                    <span id="success-text">Concluído!</span>
+                </div>
+            </div>
+        </div>
+
+        <div id="results-container">
+            <div class="results-header">
+                <h2 id="results-title">Resultado da Análise</h2>
+                <div class="actions" style="display: flex; gap: 10px; align-items: center;">
+                    <button id="back-to-drop-button" class="btn-secondary" style="display:none;">
+                        ⬅️ Nova Análise
+                    </button>
+                    <button id="export-button" class="btn-export" disabled>
+                        📥 Baixar Excel
+                    </button>
+                </div>
+            </div>
+            <div id="cards-list">
+                <div class="placeholder-card">Aguardando arquivos...</div>
+            </div>
+        </div>
+
+        <div id="history-container" style="display:none; margin-top: 30px;">
+            <div class="results-header">
+                <h2>Histórico de Sessões</h2>
+                <button id="close-history-button" class="btn-secondary">
+                    ✖️ Fechar
+                </button>
+            </div>
+            <div class="history-list" id="history-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 15px;">
+                <div class="placeholder-history" style="color: #888; padding: 20px;">Carregando histórico...</div>
+            </div>
+        </div>
+    </div>
+
+    <script type="text/javascript" src="main.js"></script>
+</body>
+</html>

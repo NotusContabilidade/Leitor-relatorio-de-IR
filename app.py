@@ -155,18 +155,17 @@ def salvar_excel(dados_json, nome_sugerido="Relatorio"):
 
         agora = datetime.now().strftime("%d/%m/%Y %H:%M")
         resumo = []
-        detalhe = []
-
-        for item in dados_json:
-            resumo.append(engine.montar_linha_resumo(item))
-            for linha in engine.montar_linhas_detalhe(item):
-                detalhe.append(linha)
-
+        bens_br = []
+        bens_ext = []
         div  = []
         isen = []
         excl = []
         rv   = []
+
         for item in dados_json:
+            resumo.append(engine.montar_linha_resumo(item))
+            bens_br.extend(engine.montar_linhas_bens_brasil(item))
+            bens_ext.extend(engine.montar_linhas_bens_exterior(item))
             div.extend(engine.montar_linhas_dividas(item))
             isen.extend(engine.montar_linhas_rendimentos(item, 'rendimentos_isentos'))
             excl.extend(engine.montar_linhas_rendimentos(item, 'rendimentos_exclusivos'))
@@ -176,9 +175,13 @@ def salvar_excel(dados_json, nome_sugerido="Relatorio"):
             pd.DataFrame(resumo).to_excel(writer, sheet_name='Resumo', index=False)
             aplicar_estetica_premium(writer.sheets['Resumo'], f"RESUMO EM {agora}")
 
-            if detalhe:
-                pd.DataFrame(detalhe).to_excel(writer, sheet_name='BENS E DIREITOS', index=False)
-                aplicar_estetica_premium(writer.sheets['BENS E DIREITOS'], "BENS E DIREITOS")
+            if bens_br:
+                pd.DataFrame(bens_br).to_excel(writer, sheet_name='BENS - BRASIL', index=False)
+                aplicar_estetica_premium(writer.sheets['BENS - BRASIL'], "BENS E DIREITOS - BRASIL")
+
+            if bens_ext:
+                pd.DataFrame(bens_ext).to_excel(writer, sheet_name='BENS - EXTERIOR', index=False)
+                aplicar_estetica_premium(writer.sheets['BENS - EXTERIOR'], "BENS E DIREITOS - EXTERIOR")
 
             if div:
                 pd.DataFrame(div).to_excel(writer, sheet_name='DÍVIDAS E ÔNUS REAIS', index=False)

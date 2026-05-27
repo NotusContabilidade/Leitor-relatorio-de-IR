@@ -61,7 +61,14 @@ def _extrair_info_capa(texto):
 def _extrair_bens_tabela(pdf):
     bens = []
     em_secao = False
-    FIM = ['Dívidas e Ônus Reais', 'Rendimentos isentos']
+    
+    # BLINDAGEM 1: Barreira estendida para garantir que a extração pare antes de encostar em Rendimentos
+    FIM = [
+        'Dívidas e Ônus Reais', 
+        'Rendimentos isentos e não tributáveis',
+        'Rendimentos sujeitos a tributação exclusiva',
+        'Renda variável'
+    ]
 
     for page in pdf.pages:
         texto = page.extract_text() or ""
@@ -72,7 +79,6 @@ def _extrair_bens_tabela(pdf):
         if not em_secao:
             continue
 
-        # Detecta fim antes de processar para pegar últimas linhas da página
         parar_apos = False
         for marker in FIM:
             if marker in texto:
@@ -85,11 +91,9 @@ def _extrair_bens_tabela(pdf):
                     continue
                 cells = [str(c).strip().replace('\n', ' ') if c else '' for c in row]
 
-                # Linha válida começa com grupo (2 dígitos)
                 if not cells[0] or not re.match(r'^\d{2}$', cells[0].strip()):
                     continue
 
-                # Ignora linhas de cabeçalho
                 combined = ' '.join(cells).lower()
                 if any(h in combined for h in ['grupo', 'discrimin', 'situação', 'cód.']):
                     continue
@@ -105,20 +109,30 @@ def _extrair_bens_tabela(pdf):
 
 
 def _tem_valor_monetario(c):
-    """True se célula contém valor monetário mesmo com espaços/newlines nos decimais."""
     return bool(re.search(r'\d+,\s*\d{2}', re.sub(r'\s', '', c)))
 
 
 def _parse_row_cells(cells):
     grupo  = cells[0].strip()
     codigo = cells[1].strip() if len(cells) > 1 else ""
-    local  = _normalizar_local(cells[2]) if len(cells) > 2 else ""
 
-    # Verifica CNPJ na posição 3 (layout BR padrão: grupo|cod|local|cnpj|disc|val|val)
+    # BLINDAGEM 2: Trava de Assinatura. Se não tem padrão de Bem, aborta a linha.
+    if not re.match(r'^\d{2}$', grupo):
+        return None
+        
+    # Se o código existe, TEM que ser 2 dígitos. Se for CNPJ ou texto (vazamento de Rendimentos), pulveriza.
+    if codigo and not re.match(r'^\d{2}$', codigo):
+        return None
+
+    local  = _normalizar_local(cells[2]) if len(cells) > 2 else ""
+    
+    # Se a coluna do código foi mesclada e o CNPJ caiu na coluna de local, pulveriza.
+    if re.search(r'\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}', local):
+        return None
+
     cnpj_c = cells[3].strip() if len(cells) > 3 else ""
     cnpj   = cnpj_c if re.match(r'^\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}$', cnpj_c) else ""
 
-    # Células com valor monetário (tolerante a espaços/\n internos)
     valores = [(i, c) for i, c in enumerate(cells) if _tem_valor_monetario(c)]
     if not valores:
         return None
@@ -126,9 +140,6 @@ def _parse_row_cells(cells):
     sit_2025 = _parse_valor(valores[-1][1])
     sit_2024 = _parse_valor(valores[-2][1]) if len(valores) >= 2 else 0.0
 
-    # Discriminação: célula(s) com letras entre local/cnpj e os valores
-    # Layout BR (com CNPJ): disc começa em idx 4
-    # Layout US (sem CNPJ, cells[3] tem letras longas): disc começa em idx 3
     disc_start = 4 if cnpj else (
         3 if len(cells) > 3 and re.search(r'[A-Za-z]', cells[3]) and len(cells[3]) > 5
         else 4
@@ -139,7 +150,6 @@ def _parse_row_cells(cells):
     disc = ' '.join(cells[disc_start:disc_end]).strip()
     disc = re.sub(r'\s+', ' ', disc)
 
-    # Rejeita disc puramente numérica (linhas de continuação/custo médio)
     if not disc or len(disc) < 4 or not re.search(r'[A-Za-zÀ-ÖØ-öø-ÿ]', disc):
         return None
 
@@ -159,7 +169,14 @@ def _parse_row_cells(cells):
 def _extrair_bens_texto(pdf):
     texto_secao = ""
     em_secao = False
-    FIM = ['Dívidas e Ônus Reais', 'Rendimentos isentos']
+    
+    # BLINDAGEM 1 (Fallback): Barreira estendida
+    FIM = [
+        'Dívidas e Ônus Reais', 
+        'Rendimentos isentos e não tributáveis',
+        'Rendimentos sujeitos a tributação exclusiva',
+        'Renda variável'
+    ]
 
     for page in pdf.pages:
         texto = page.extract_text() or ""
@@ -190,14 +207,15 @@ def _extrair_bens_texto(pdf):
 
     for line in texto_secao.split('\n'):
         ls = line.strip()
-        m = re.match(r'^(\d{2})\s+(\d{2})\b(.*)', ls)
+        # BLINDAGEM 3: Regex Anti-CNPJ. O (?!\.) impede que o "12" de "12.345..." seja lido como código do bem.
+        m = re.match(r'^(\d{2})\s+(\d{2})(?:\s+(?!\.)(.*))?$', ls)
         if m:
             if buffer and grupo:
                 bem = _parse_entry_texto(grupo, codigo, buffer)
                 if bem:
                     bens.append(bem)
             grupo, codigo = m.group(1), m.group(2)
-            buffer = [m.group(3).strip()] if m.group(3).strip() else []
+            buffer = [m.group(3).strip()] if m.group(3) and m.group(3).strip() else []
         elif grupo and ls:
             buffer.append(ls)
 
@@ -215,8 +233,16 @@ def _parse_entry_texto(grupo, codigo, lines):
     m_cnpj  = re.search(r'(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})', text)
     cnpj    = m_cnpj.group(1) if m_cnpj else ""
 
-    m_local = re.search(r'(1\d{2}\s*-\s*(?:Brasil|BRASIL|Estados\s+Unidos|ESTADOS\s+UNIDOS))', text, re.IGNORECASE)
-    local   = _normalizar_local(m_local.group(1)) if m_local else "105 - Brasil"
+    m_local = re.search(r'(\d{3}\s*-\s*(?:Brasil|BRASIL|Estados\s+Unidos|ESTADOS\s+UNIDOS))', text, re.IGNORECASE)
+    
+    if m_local:
+        local = _normalizar_local(m_local.group(1))
+    elif "estados unidos" in text.lower() or "unidos" in text.lower():
+        local = "249 - Estados Unidos"
+    elif "brasil" in text.lower() or cnpj:
+        local = "105 - Brasil"
+    else:
+        local = "105 - Brasil"
 
     valores = re.findall(r'(?<![,\d])(\d{1,3}(?:\.\d{3})*,\d{2})(?![,\d])', text)
     if not valores:
@@ -225,13 +251,12 @@ def _parse_entry_texto(grupo, codigo, lines):
     sit_2024 = _parse_valor(valores[-2]) if len(valores) >= 2 else 0.0
     sit_2025 = _parse_valor(valores[-1])
 
-    # Discriminação: remove valores, local, cnpj
     disc = text
     for v in (valores[-2:] if len(valores) >= 2 else valores[-1:]):
         pos = disc.rfind(v)
         if pos >= 0:
             disc = disc[:pos].strip()
-    for rem in [local, cnpj]:
+    for rem in [m_local.group(1) if m_local else "", cnpj]:
         if rem:
             disc = disc.replace(rem, '', 1)
     disc = re.sub(r'^\s*[\d\-/\s]+', '', disc)
@@ -268,29 +293,35 @@ _EXCLUSIVOS_SUBS = [
 
 
 def _extrair_rendimentos_exterior(pdf):
-    """Extrai Aplicação Financeira (rendimento/perda + imposto) de ativos no exterior."""
     result = {}
     for page in pdf.pages:
         texto = page.extract_text() or ""
         ticker_atual = None
         for linha in texto.split('\n'):
             ls = linha.strip()
+            
             m = re.match(r'^Rendimentos de (\S+)$', ls)
             if m:
                 ticker_atual = m.group(1)
+                if ticker_atual not in result:
+                    result[ticker_atual] = []
                 continue
+                
             if ticker_atual and 'Aplica' in ls and 'Financeira' in ls:
-                m_rend = re.search(r'Rendimento ou Perda:\s*(-?)R\$\s*([\d.,]+)', ls)
+                m_rend = re.search(r'Rendimento ou Perda:\s*(-?)\s*R\$\s*(-?)\s*([\d.,]+)', ls)
                 m_imp  = re.search(r'Imposto pago no Exterior:\s*R\$\s*([\d.,]+)', ls)
+                
                 rend = 0.0
                 imp  = 0.0
+                
                 if m_rend:
-                    rend = _parse_valor(m_rend.group(2))
-                    if m_rend.group(1) == '-':
+                    rend = _parse_valor(m_rend.group(3))
+                    if '-' in m_rend.group(1) or '-' in m_rend.group(2):
                         rend = -rend
                 if m_imp:
                     imp = _parse_valor(m_imp.group(1))
-                result[ticker_atual] = {'rendimento_exterior': rend, 'imposto_exterior': imp}
+                    
+                result[ticker_atual].append({'rendimento_exterior': rend, 'imposto_exterior': imp})
                 ticker_atual = None
     return result
 
@@ -300,7 +331,6 @@ def _extrair_dividas(pdf):
     em_secao = False
     for page in pdf.pages:
         texto = page.extract_text() or ""
-        # Ativa apenas na página de corpo (tem "SHORT/VENDIDA"), não na intro
         if 'Dívidas e Ônus Reais' in texto and 'Rendimentos isentos' not in texto:
             em_secao = True
         if not em_secao:
@@ -317,9 +347,7 @@ def _extrair_dividas(pdf):
                 if any(h in combined for h in ['cód', 'discrimin', 'situação']):
                     continue
                 codigo = cells[0].strip()
-                # Discriminação está em cells[2] (cells[1] é artefato None do pdfplumber)
                 disc = re.sub(r'\s+', ' ', cells[2]).strip() if len(cells) > 2 else ''
-                # Valor pode ter \n → "746, 20", usar \s* no padrão
                 valores = [(i, c) for i, c in enumerate(cells) if re.search(r'\d+,\s*\d{2}', c)]
                 sit_2024 = _parse_valor(valores[-2][1]) if len(valores) >= 2 else 0.0
                 sit_2025 = _parse_valor(valores[-1][1]) if valores else 0.0
@@ -337,8 +365,6 @@ def _extrair_rendimentos_secao(pdf, start_marker, end_marker, sub_headers):
     sub_atual = ''
     for page in pdf.pages:
         texto = page.extract_text() or ""
-        # Ativa apenas quando o end_marker NÃO está na mesma página (evita página de intro
-        # que lista todas as seções ao mesmo tempo)
         if start_marker in texto and end_marker not in texto and not em_secao:
             em_secao = True
         if not em_secao:
@@ -352,7 +378,6 @@ def _extrair_rendimentos_secao(pdf, start_marker, end_marker, sub_headers):
                 if not row:
                     continue
                 cells = [str(c).strip().replace('\n', ' ') if c else '' for c in row]
-                # Compacta: remove células vazias/None para lidar com colunas mescladas
                 compact = [c for c in cells if c.strip()]
                 if not compact:
                     continue
@@ -362,7 +387,6 @@ def _extrair_rendimentos_secao(pdf, start_marker, end_marker, sub_headers):
                 tipo = compact[0].strip()
                 if not re.match(r'^\d{2}$', tipo):
                     continue
-                # Valor: último elemento não vazio que case \d+,\s*\d{2}
                 valores_c = [(i, c) for i, c in enumerate(compact) if re.search(r'\d+,\s*\d{2}', c)]
                 if not valores_c:
                     continue
@@ -482,14 +506,11 @@ def analisar_pdf_worker(pdf_bytes, pasta_nome, nome_arquivo_pdf):
 
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            # Capa: nome, CPF, ano
             texto_capa = "".join((p.extract_text() or "") + "\n" for p in pdf.pages[:2])
             dados["nome"], dados["cpf"], dados["ano_calendario"] = _extrair_info_capa(texto_capa)
 
-            # Extração principal (tabela)
             bens = _extrair_bens_tabela(pdf)
 
-            # Fallback por texto se poucos resultados
             if len(bens) < 3:
                 bens_txt = _extrair_bens_texto(pdf)
                 if len(bens_txt) > len(bens):
@@ -508,13 +529,17 @@ def analisar_pdf_worker(pdf_bytes, pasta_nome, nome_arquivo_pdf):
                 bem.setdefault('rendimento_exterior', 0.0)
                 bem.setdefault('imposto_exterior', 0.0)
                 local = bem.get('local', '')
+                
                 if '105' in local or 'brasil' in local.lower():
                     continue
+                    
                 m_t = re.match(r'^(\S+)\s+-', bem.get('discriminacao', ''))
                 if m_t and m_t.group(1) in rendimentos_ext:
-                    rd = rendimentos_ext[m_t.group(1)]
-                    bem['rendimento_exterior'] = rd['rendimento_exterior']
-                    bem['imposto_exterior']    = rd['imposto_exterior']
+                    lista_rend = rendimentos_ext[m_t.group(1)]
+                    if lista_rend:
+                        rd = lista_rend.pop(0)
+                        bem['rendimento_exterior'] = rd['rendimento_exterior']
+                        bem['imposto_exterior']    = rd['imposto_exterior']
 
             dados["dividas"] = _extrair_dividas(pdf)
             dados["rendimentos_isentos"] = _extrair_rendimentos_secao(
@@ -552,26 +577,43 @@ def montar_linha_resumo(item):
         "Arquivo PDF":             item.get("arquivo_pdf", "")
     }
 
-
-def montar_linhas_detalhe(item):
+def montar_linhas_bens_brasil(item):
     linhas = []
     for b in item.get("bens", []):
-        linhas.append({
-            "Nome":                  item.get("nome", ""),
-            "CPF":                   item.get("cpf", ""),
-            "Ano Calendário":        item.get("ano_calendario", ""),
-            "Grupo":                 b.get("grupo", ""),
-            "Código":                b.get("codigo", ""),
-            "Localização":           b.get("local", ""),
-            "CNPJ":                  b.get("cnpj", ""),
-            "Discriminação":         b.get("discriminacao", ""),
-            "Sit. 31/12/2024 (R$)":  b.get("sit_2024", 0.0),
-            "Sit. 31/12/2025 (R$)":  b.get("sit_2025", 0.0),
-            "Rend./Perda Ext. (R$)": b.get("rendimento_exterior", 0.0),
-            "Imp. Pago Ext. (R$)":   b.get("imposto_exterior", 0.0)
-        })
+        local = b.get("local", "").lower()
+        if ("105" in local or "brasil" in local) and b.get('rendimento_exterior', 0.0) == 0.0:
+            linhas.append({
+                "Nome":                  item.get("nome", ""),
+                "CPF":                   item.get("cpf", ""),
+                "Ano Calendário":        item.get("ano_calendario", ""),
+                "Grupo":                 b.get("grupo", ""),
+                "Código":                b.get("codigo", ""),
+                "CNPJ":                  b.get("cnpj", ""),
+                "Discriminação":         b.get("discriminacao", ""),
+                "Sit. 31/12/2024 (R$)":  b.get("sit_2024", 0.0),
+                "Sit. 31/12/2025 (R$)":  b.get("sit_2025", 0.0)
+            })
     return linhas
 
+def montar_linhas_bens_exterior(item):
+    linhas = []
+    for b in item.get("bens", []):
+        local = b.get("local", "").lower()
+        if ("105" not in local and "brasil" not in local) or b.get('rendimento_exterior', 0.0) != 0.0:
+            linhas.append({
+                "Nome":                  item.get("nome", ""),
+                "CPF":                   item.get("cpf", ""),
+                "Ano Calendário":        item.get("ano_calendario", ""),
+                "Grupo":                 b.get("grupo", ""),
+                "Código":                b.get("codigo", ""),
+                "Localização":           b.get("local", "") if b.get("local") else "249 - Estados Unidos",
+                "Discriminação":         b.get("discriminacao", ""),
+                "Sit. 31/12/2024 (R$)":  b.get("sit_2024", 0.0),
+                "Sit. 31/12/2025 (R$)":  b.get("sit_2025", 0.0),
+                "Rend./Perda Ext. (R$)": b.get("rendimento_exterior", 0.0),
+                "Imp. Pago Ext. (R$)":   b.get("imposto_exterior", 0.0)
+            })
+    return linhas
 
 def montar_linhas_dividas(item):
     rows = []

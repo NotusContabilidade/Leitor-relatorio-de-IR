@@ -280,15 +280,16 @@ _MESES_ABR  = ['Jan','Fev','Mar','Abr','Mai','Jun',
 _ISENTOS_SUBS = [
     ('Dividendos',             'Dividendos'),
     ('Rendimentos de FII',     'Rendimentos de FII'),
-    ('Vendas abaixo de 20mil', 'Vendas abaixo de 20mil'),
+    ('Vendas abaixo de 20mil', 'Vendas abaixo de 20mil no mês'),
     ('Bonificações',           'Bonificações'),
+    ('Rendimentos de fundos',  'Rendimentos de fundos e renda fixa'),
 ]
 _EXCLUSIVOS_SUBS = [
-    ('JCP (Juros sobre Capital',  'JCP'),
-    ('Outros rendimentos',        'Outros rendimentos'),
-    ('Aluguel (',                 'Aluguel'),
-    ('Amortizações',              'Amortizações'),
-    ('Rendimentos de fundos',     'Rendimentos de fundos e renda fixa'),
+    ('JCP (Juros sobre Capital', 'JCP'),
+    ('Outros rendimentos',       'Outros rendimentos'),
+    ('Aluguel (',                'Aluguel'),
+    ('Amortizações',             'Amortizações'),
+    ('Rendimentos de fundos',    'Rendimentos de fundos e renda fixa'),
 ]
 
 
@@ -359,47 +360,124 @@ def _extrair_dividas(pdf):
     return dividas
 
 
+def _parse_row_rendimento(row, sub_secao):
+    if not row:
+        return None
+    cells = [str(c).strip().replace('\n', ' ') if c else '' for c in row]
+    compact = [c for c in cells if c.strip()]
+    if not compact:
+        return None
+    combined = ' '.join(compact).lower()
+    if any(h in combined for h in ['tipo', 'cnpj da fonte', 'nome da fonte']):
+        return None
+    tipo_raw = compact[0].strip()
+    m_tipo = re.match(r'^(\d{2})\b', tipo_raw)
+    if not m_tipo:
+        return None
+    tipo = m_tipo.group(1)
+    valores_c = [(i, c) for i, c in enumerate(compact) if re.search(r'\d+,\s*\d{2}', c)]
+    if not valores_c:
+        return None
+    valor   = _parse_valor(valores_c[-1][1])
+    val_pos = valores_c[-1][0]
+    middle  = compact[1:val_pos]
+    cnpj  = middle[0] if middle and re.match(r'^\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}', middle[0]) else ''
+    nome_f = middle[1] if len(middle) > 1 else (middle[0] if middle and not cnpj else '')
+    desc  = re.sub(r'\s+', ' ', ' '.join(middle[2:])).strip() if len(middle) > 2 else ''
+    return {'sub_secao': sub_secao, 'tipo': tipo, 'cnpj': cnpj,
+            'nome_fonte': nome_f, 'descricao': desc, 'valor': valor}
+
+
+def _sub_acima_da_tabela(page, bbox_top, sub_headers, sub_atual):
+    """Retorna a última sub-seção encontrada no texto ACIMA da tabela na página."""
+    if bbox_top <= 2:
+        return sub_atual
+    try:
+        text_above = page.crop((0, 0, page.width, bbox_top)).extract_text() or ""
+    except Exception:
+        return sub_atual
+    last_pos = -1
+    resultado = sub_atual
+    for chave, nome in sub_headers:
+        pos = text_above.rfind(chave)
+        if pos > last_pos:
+            last_pos = pos
+            resultado = nome
+    return resultado
+
+
 def _extrair_rendimentos_secao(pdf, start_marker, end_marker, sub_headers):
-    linhas    = []
-    em_secao  = False
+    linhas = []
+    em_secao = False
     sub_atual = ''
+    start_occurrences = 0  # conta quantas vezes o start_marker foi encontrado
+
     for page in pdf.pages:
         texto = page.extract_text() or ""
-        if start_marker in texto and end_marker not in texto and not em_secao:
-            em_secao = True
+        just_activated = False
+
         if not em_secao:
-            continue
-        parar = end_marker in texto
-        for chave, nome in sub_headers:
-            if chave in texto:
-                sub_atual = nome
-        for table in (page.extract_tables() or []):
-            for row in table:
-                if not row:
-                    continue
-                cells = [str(c).strip().replace('\n', ' ') if c else '' for c in row]
-                compact = [c for c in cells if c.strip()]
-                if not compact:
-                    continue
-                combined = ' '.join(compact).lower()
-                if any(h in combined for h in ['tipo', 'cnpj da fonte', 'nome da fonte', 'tip\nipo']):
-                    continue
-                tipo = compact[0].strip()
-                if not re.match(r'^\d{2}$', tipo):
-                    continue
-                valores_c = [(i, c) for i, c in enumerate(compact) if re.search(r'\d+,\s*\d{2}', c)]
-                if not valores_c:
-                    continue
-                valor   = _parse_valor(valores_c[-1][1])
-                val_pos = valores_c[-1][0]
-                middle  = compact[1:val_pos]
-                cnpj = middle[0] if middle and re.match(r'^\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}', middle[0]) else ''
-                nome = middle[1] if len(middle) > 1 else (middle[0] if middle and not cnpj else '')
-                desc = re.sub(r'\s+', ' ', ' '.join(middle[2:])).strip() if len(middle) > 2 else ''
-                linhas.append({'sub_secao': sub_atual, 'tipo': tipo, 'cnpj': cnpj,
-                               'nome_fonte': nome, 'descricao': desc, 'valor': valor})
-        if parar:
+            if start_marker not in texto:
+                continue
+            start_occurrences += 1
+            # A primeira ocorrência do start_marker junto com o end_marker é a página de visão
+            # geral (resumo inicial do PDF). Ignora e espera a ocorrência real da seção.
+            if end_marker in texto and start_occurrences == 1:
+                continue
+            em_secao = True
+            just_activated = True
+
+        # Se o end_marker aparece nesta página e não foi a página de ativação,
+        # para ANTES de processar as tabelas (evita capturar dados da próxima seção).
+        if end_marker in texto and not just_activated:
             break
+
+        # Tenta detecção posicional: associa cada tabela à sub-seção que aparece acima dela
+        try:
+            page_tables = page.find_tables()
+        except Exception:
+            page_tables = []
+
+        if page_tables:
+            for tbl in page_tables:
+                try:
+                    bbox_top = tbl.bbox[1]
+                except Exception:
+                    bbox_top = 0
+                local_sub = _sub_acima_da_tabela(page, bbox_top, sub_headers, sub_atual)
+                try:
+                    rows = tbl.extract()
+                except Exception:
+                    continue
+                for row in (rows or []):
+                    linha = _parse_row_rendimento(row, local_sub)
+                    if linha:
+                        linhas.append(linha)
+        else:
+            # Fallback sem posição: usa última sub-seção encontrada na página
+            last_pos = -1
+            for chave, nome in sub_headers:
+                pos = texto.rfind(chave)
+                if pos > last_pos:
+                    last_pos = pos
+                    sub_atual = nome
+            for table in (page.extract_tables() or []):
+                for row in table:
+                    linha = _parse_row_rendimento(row, sub_atual)
+                    if linha:
+                        linhas.append(linha)
+
+        # Atualiza sub_atual para a última sub-seção desta página (usada como fallback na próxima)
+        last_pos = -1
+        for chave, nome in sub_headers:
+            pos = texto.rfind(chave)
+            if pos > last_pos:
+                last_pos = pos
+                sub_atual = nome
+
+        if end_marker in texto:
+            break
+
     return linhas
 
 
@@ -407,6 +485,7 @@ def _extrair_dt_mensal(pdf):
     meses  = []
     em_dt  = False
     atual  = None
+
     for page in pdf.pages:
         texto = page.extract_text() or ""
         if 'Operações Comuns / Day-Trade' in texto and not em_dt:
@@ -417,32 +496,90 @@ def _extrair_dt_mensal(pdf):
             if atual:
                 meses.append(atual)
             break
+
         m = re.search(r'Mês:\s*(' + '|'.join(_MESES_FULL) + r')', texto)
         if m:
             if atual:
                 meses.append(atual)
-            atual = {'mes': m.group(1), 'resultado_comuns': 0.0, 'resultado_dt': 0.0,
-                     'prejuizo_compensar': 0.0, 'base_calculo': 0.0,
-                     'imposto_devido': 0.0, 'imposto_pagar': 0.0, 'imposto_pago': 0.0}
+            atual = {
+                'mes': m.group(1),
+                'resultado_comuns': 0.0, 'resultado_dt': 0.0,
+                'resultado_neg_anterior': 0.0,
+                'prejuizo_compensar': 0.0, 'base_calculo': 0.0,
+                'imposto_devido': 0.0, 'imposto_pagar': 0.0, 'imposto_pago': 0.0,
+            }
+
         if not atual:
             continue
-        for line in texto.split('\n'):
-            ls  = line.strip()
-            ul  = ls.upper()
-            pv  = [_parse_valor(v) for v in re.findall(r'-?R\$\s*[\d.,]+', ls)]
-            if 'RESULTADO LÍQUIDO DO MÊS' in ul and len(pv) >= 2:
-                atual['resultado_comuns'] = pv[0]
-                atual['resultado_dt']     = pv[1]
-            elif 'PREJUÍZO A COMPENSAR' in ul and pv:
-                atual['prejuizo_compensar'] = pv[0]
-            elif 'BASE DE CÁLCULO DO IMPOSTO' in ul and pv:
-                atual['base_calculo'] = pv[0]
-            elif 'IMPOSTO DEVIDO' in ul and 'TOTAL' not in ul and pv:
-                atual['imposto_devido'] = pv[0]
-            elif ls.lower().startswith('imposto a pagar') and pv:
-                atual['imposto_pagar'] = pv[0]
-            elif ls.lower().startswith('imposto pago') and pv:
-                atual['imposto_pago'] = pv[0]
+
+        acertos = 0
+        for table in (page.extract_tables() or []):
+            for row in table:
+                if not row or not row[0]:
+                    continue
+                cells = [str(c).strip().replace('\n', ' ') if c else '' for c in row]
+                first_upper = cells[0].upper()
+
+                if any(h in first_upper for h in [
+                    'OPERAÇÕES', 'RESULTADOS', 'CONSOLIDAÇÃO',
+                    'MERCADO', 'TITULAR', 'DEPENDENTES'
+                ]):
+                    continue
+
+                vals = []
+                for c in cells[1:]:
+                    if c and re.search(r'\d', c) and '%' not in c:
+                        vals.append(_parse_valor(c))
+
+                if 'RESULTADO LÍQUIDO DO MÊS' in first_upper and vals:
+                    if len(vals) >= 2:
+                        atual['resultado_comuns'] = vals[0]
+                        atual['resultado_dt']     = vals[1]
+                    else:
+                        atual['resultado_comuns'] = vals[0]
+                    acertos += 1
+                elif 'RESULTADO NEGATIVO' in first_upper and vals:
+                    atual['resultado_neg_anterior'] = vals[0]; acertos += 1
+                elif 'BASE DE CÁLCULO' in first_upper and vals:
+                    atual['base_calculo'] = vals[0]; acertos += 1
+                elif 'PREJUÍZO A COMPENSAR' in first_upper and vals:
+                    atual['prejuizo_compensar'] = vals[0]; acertos += 1
+                elif 'IMPOSTO DEVIDO' in first_upper and 'TOTAL' not in first_upper and vals:
+                    atual['imposto_devido'] = vals[0]; acertos += 1
+                elif first_upper == 'IMPOSTO A PAGAR' and vals:
+                    atual['imposto_pagar'] = vals[0]; acertos += 1
+                elif first_upper == 'IMPOSTO PAGO' and vals:
+                    atual['imposto_pago'] = vals[0]; acertos += 1
+
+        # Fallback texto: usado quando o PDF não tem tabelas reais na seção DT
+        if acertos == 0:
+            for linha in texto.split('\n'):
+                ls = linha.strip()
+                lu = ls.upper()
+                vals = [_parse_valor(v) for v in re.findall(r'-?\d{1,3}(?:\.\d{3})*,\d{2}', ls)]
+                if not vals:
+                    continue
+                if 'RESULTADO' in lu and 'LÍQUIDO' in lu and 'MÊS' in lu:
+                    if len(vals) >= 2:
+                        atual['resultado_comuns'] = vals[0]
+                        atual['resultado_dt']     = vals[1]
+                    else:
+                        atual['resultado_comuns'] = vals[0]
+                elif 'RESULTADO NEGATIVO' in lu:
+                    atual['resultado_neg_anterior'] = vals[0]
+                elif 'BASE DE CÁLCULO' in lu:
+                    atual['base_calculo'] = vals[0]
+                elif 'PREJUÍZO' in lu and 'COMPENSAR' in lu:
+                    atual['prejuizo_compensar'] = vals[0]
+                elif 'IMPOSTO DEVIDO' in lu and 'TOTAL' not in lu:
+                    atual['imposto_devido'] = vals[0]
+                elif 'IMPOSTO A PAGAR' in lu:
+                    atual['imposto_pagar'] = vals[0]
+                elif 'IMPOSTO PAGO' in lu:
+                    atual['imposto_pago'] = vals[0]
+
+    if atual:
+        meses.append(atual)
     return meses
 
 
@@ -656,7 +793,7 @@ def montar_linhas_renda_variavel(item):
             "Resultado Líquido Comuns (R$)":     d.get("resultado_comuns", 0.0),
             "Resultado Líquido Day-Trade (R$)":  d.get("resultado_dt", 0.0),
             "Resultado Líquido FII (R$)":        None,
-            "Resultado Neg. Anterior (R$)":      None,
+            "Resultado Neg. Anterior (R$)":      d.get("resultado_neg_anterior", 0.0),
             "Base de Cálculo (R$)":              d.get("base_calculo", 0.0),
             "Prejuízo a Compensar (R$)":         d.get("prejuizo_compensar", 0.0),
             "Imposto Devido (R$)":               d.get("imposto_devido", 0.0),
